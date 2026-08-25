@@ -1,0 +1,9 @@
+# Windowsで書いてLinuxで動かす。CRLFのまま渡るとDockerfileのシェル行やスクリプトが壊れる。
+# core.autocrlf は各人の環境設定なので当てにせず、リポジトリ側で固定する。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.gz binary
+*.db binary

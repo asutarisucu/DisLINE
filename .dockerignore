@@ -1,0 +1,9 @@
+node_modules/
+# 認証トークン・E2EE鍵・対応表。イメージに焼き込むと配布事故になる。
+data/
+.env
+.git/
+*.log
+test/
+tsconfig.json
+README.md

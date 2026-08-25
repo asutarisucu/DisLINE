@@ -1,0 +1,26 @@
+{
+  "name": "dis-line",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bridge your LINE account into a Discord server.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --env-file=.env src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "@evex/linejs": "npm:@jsr/evex__linejs@^3.2.1",
+    "@evex/linejs-types": "npm:@jsr/evex__linejs-types@^3.2.1",
+    "discord.js": "^14.27.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "@types/qrcode": "^1.5.6",
+    "typescript": "^7.0.2"
+  }
+}

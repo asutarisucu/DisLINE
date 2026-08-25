@@ -1,0 +1,34 @@
+services:
+  dis-line:
+    build: .
+    image: dis-line:local
+    container_name: dis-line
+    # 落ちたら起動し直す。ポーリングが復旧しないとき、プロセスは自分から終了する。
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # .env 側の値より優先させる。コンテナ内の置き場所は固定。
+      DATA_DIR: /app/data
+    volumes:
+      # LINEの認証トークン・E2EE鍵・SQLite。失うと /line login からやり直しになる。
+      #
+      # 名前付きボリュームにしてある。SQLite は POSIX のファイルロックを要求するので、
+      # Docker Desktop(Windows/macOS)のバインドマウントやNAS越しだと "disk I/O error" で
+      # 起動すらできない。名前付きボリュームならどの環境でも動く。
+      #
+      # Linuxサーバーでファイルに直接触りたい場合は、次の行に差し替えてよい（ext4なら動く）:
+      #   - ./data:/app/data
+      # その場合、先に `mkdir -p data` すること。無いとDockerがroot所有で作り、
+      # 非rootのコンテナが書けなくなる。
+      - data:/app/data
+    # 24時間動かすとログでディスクが埋まる。上限を決めておく。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    stop_grace_period: 20s
+
+volumes:
+  data:
+    name: dis-line-data

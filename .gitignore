@@ -1,0 +1,5 @@
+node_modules/
+# LINEの認証トークン・E2EE鍵・チャンネル対応表が入る。絶対にコミットしないこと。
+data/
+.env
+*.log
