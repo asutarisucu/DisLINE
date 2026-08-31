@@ -3,7 +3,13 @@
 自分のLINEアカウントをDiscordサーバーに橋渡しし、LINEのやり取りをDiscord上で完結させるBotです。
 LINEのトークがDiscordのチャンネルとして展開され、そのチャンネルで発言するとLINEに送信されます。
 
-現在は**自分専用（1インスタンス＝1LINEアカウント）**の構成です。
+自分のマシンで動かすことを前提にした構成です（1インスタンス＝1LINEアカウント）。
+公開Botとしての運用は想定していません（[理由](#公開botにしない理由)）。
+
+> [!WARNING]
+> **これは LINE の非公式クライアント（[LINEJS](https://github.com/evex-dev/linejs)）を使います。**
+> 自動化されたクライアントによるアクセスは LINE の利用規約に反し、**アカウントが利用停止になる可能性があります。**
+> また LINE 側の仕様変更で予告なく動かなくなります。リスクを理解したうえで自己責任で使ってください。
 
 ## 動作要件
 
@@ -15,6 +21,9 @@ LINEのトークがDiscordのチャンネルとして展開され、そのチャ
 TypeScriptをNodeが直接実行し、SQLiteは `node:sqlite`（組み込み）を使うため、
 どちらの経路でもビルドステップとネイティブモジュールのコンパイルはありません。
 
+Dockerイメージは **x86_64 と arm64** で動きます（Raspberry Pi は64bit OSが必要です。
+32bit ARM 向けの `node:24-alpine` は提供されていません）。
+
 ## セットアップ
 
 必要な設定は **Discord の Bot トークン 1つだけ**です。アプリID・サーバーID・あなたのユーザーIDは
@@ -24,8 +33,8 @@ TypeScriptをNodeが直接実行し、SQLiteは `node:sqlite`（組み込み）�
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) で **New Application**
 2. **Bot** タブ → Token を発行して控える
-3. 同じ Bot タブで **MESSAGE CONTENT INTENT を有効にする**
-   （これが無いとDiscord側の発言内容が空になり、LINEへ何も送れません）
+3. 同じ Bot タブの **Privileged Gateway Intents** で **MESSAGE CONTENT INTENT を有効にする**
+   （無効のままだと Discord に接続を拒否され、`DisallowedIntents` で起動に失敗します）
 
 招待URLはここでは要りません。起動するとログに出ます。
 
@@ -186,7 +195,7 @@ Docker Compose で常時稼働させます。サーバー側に Node のイン�
 ### 初回
 
 ```sh
-git clone <このリポジトリ> dis-line && cd dis-line
+git clone https://github.com/asutarisucu/DisLINE.git dis-line && cd dis-line
 cp .env.example .env      # 値を埋める
 docker compose up -d --build
 docker compose logs dis-line          # 招待URLが出る
@@ -270,6 +279,38 @@ docker compose start
 送信失敗時の診断ログに **LINE のメッセージ本文が出る経路がある**ため、ログの扱いは認証情報と同程度に。
 
 
+## うまく動かないとき
+
+| 症状 | 原因と対処 |
+|---|---|
+| `DisallowedIntents` で起動に失敗する | MESSAGE CONTENT INTENT が無効です。Developer Portal → Bot → Privileged Gateway Intents でONにして保存し、起動し直してください |
+| `TokenInvalid` で起動に失敗する | `.env` の `DISCORD_TOKEN` が違います。Developer Portal → Bot → Reset Token で再発行してください |
+| `env file ... not found` | `.env` を作っていません。`cp .env.example .env` してからトークンを書いてください |
+| 招待URLがログに出ない | すでにサーバーに参加しています。招待し直したい場合は `/line status` ではなくログの起動時メッセージを確認するか、一度Botをサーバーから外してください |
+| `Botが N 個のサーバーに参加しています` | 対象を決められません。`.env` の `DISCORD_GUILD_ID` に使うサーバーのIDを書いてください |
+| `disk I/O error` （SQLite） | `data/` をバインドマウントしていて、その置き場所が Docker Desktop や NAS 越しです。既定の名前付きボリュームを使ってください |
+| `データ置き場 ... に書き込めません` | バインドマウント元が root 所有です。`mkdir -p data && sudo chown -R 1000:1000 data` |
+| スラッシュコマンドが出てこない | 招待時に `applications.commands` スコープが付いていません。ログの招待URLで招待し直してください |
+| 送信者名が `不明なユーザー (u1234abcd)` になる | LINE側で相手の情報を取得できていません。コンソールの `[line] … 表示名を取得できませんでした` に理由が出ます |
+| Discordに同じメッセージが2回出る | 別の場所で同じLINEセッションのインスタンスが動いていないか確認してください |
+
+ログは `docker compose logs -f dis-line`（Dockerの場合）で見られます。
+
+## 公開Botにしない理由
+
+このBotは**自分で立てて自分で使う**前提です。誰でも招待できる公開Botとして運用することは勧めません。
+
+ブリッジは常時接続していないと成立せず、**接続している間は認証情報がメモリ上で平文である必要があります。**
+保存時に暗号化しても守れるのはディスクを盗まれた場合だけで、稼働中のサーバーが侵害されれば
+全利用者ぶんのLINEセッションが同時に取られます。LINEアカウントの掌握は「メッセージが読める」で終わらず、
+友だち全員へのなりすましまで届くため、被害範囲が利用者数×その人の人間関係になります。
+
+これは実装で軽くできる種類の問題ではなく、**預かるのをやめる以外に消す方法がありません。**
+だからこのリポジトリは、各自が自分の環境に立てる形で配布しています。
+
+（このほかにも、Discordの Message Content Intent の審査、同一IPからの多数アカウント接続、
+個人情報保護法上の義務といった壁があります）
+
 ## 制限と既知の事項
 
 **運ばれないもの**
@@ -323,4 +364,6 @@ src/
 
 ## ライセンス
 
-MIT
+MIT（[LICENSE](LICENSE)）
+
+依存している [LINEJS](https://github.com/evex-dev/linejs) も MIT です。

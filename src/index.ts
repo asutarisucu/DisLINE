@@ -176,4 +176,31 @@ process.on("unhandledRejection", (reason) => {
 	console.error("[fatal] 未処理のPromise拒否:", reason);
 });
 
-await discord.login(config.discordToken);
+/**
+ * 接続できないときの原因を、対処に直結する形で出す。
+ *
+ * ここで落ちる原因はほぼ設定ミスの2つに絞られるが、discord.js の既定のメッセージは
+ * どちらも「何をすればいいか」を書いていない。再起動ポリシーと組み合わさると
+ * 同じ例外を延々と吐き続けることになるので、最初の1回で分かるようにする。
+ */
+try {
+	await discord.login(config.discordToken);
+} catch (error) {
+	const code = (error as { code?: string })?.code;
+	if (code === "DisallowedIntents") {
+		console.error(
+			"\n[setup] Discordへの接続を拒否されました。\n" +
+				"  MESSAGE CONTENT INTENT が有効になっていません。\n" +
+				"  Developer Portal → 対象のアプリ → Bot タブ → Privileged Gateway Intents で\n" +
+				"  「MESSAGE CONTENT INTENT」をONにして保存し、起動し直してください。\n",
+		);
+	} else if (code === "TokenInvalid") {
+		console.error(
+			"\n[setup] Discordのトークンが正しくありません。\n" +
+				"  .env の DISCORD_TOKEN を確認してください（Developer Portal → Bot → Reset Token で再発行できます）。\n",
+		);
+	} else {
+		console.error("[setup] Discordへのログインに失敗しました:", error);
+	}
+	process.exit(1);
+}
