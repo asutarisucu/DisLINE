@@ -19,6 +19,7 @@ import { getClient, loginByQr, logout, requireClient } from "../line/session.ts"
 import { invalidate, listChats, search } from "../line/directory.ts";
 import { retractOwnMessage } from "../bridge.ts";
 import { runtime } from "../runtime.ts";
+import { STICKER_PREFIX, cmdSticker, handleStickerComponent, stickerChoices } from "./stickers.ts";
 
 const RETRACT_COMMAND = "LINEで取り消す";
 
@@ -62,6 +63,14 @@ export const commandData = [
 		)
 		.addSubcommand((s) => s.setName("close").setDescription("このチャンネルを閉じます（トーク自体は消えません）"))
 		.addSubcommand((s) => s.setName("sync").setDescription("グループ/友だち一覧を取り直します"))
+		.addSubcommand((s) =>
+			s
+				.setName("sticker")
+				.setDescription("持っているスタンプを選んでこのトークに送ります")
+				.addStringOption((o) =>
+					o.setName("package").setDescription("スタンプ名").setRequired(true).setAutocomplete(true),
+				),
+		)
 		.toJSON(),
 	// メッセージを右クリック（スマホは長押し）→ アプリ → この項目。
 	new ContextMenuCommandBuilder()
@@ -77,6 +86,16 @@ export function createInteractionHandler(discord: DiscordClient, startBridge: St
 		try {
 			if (interaction.isAutocomplete()) return await handleAutocomplete(interaction);
 			if (interaction.isMessageContextMenuCommand()) return await handleRetract(discord, interaction);
+			if (
+				(interaction.isButton() || interaction.isStringSelectMenu()) &&
+				interaction.customId.startsWith(STICKER_PREFIX)
+			) {
+				if (interaction.user.id !== runtime().ownerId) {
+					await interaction.reply({ content: "所有者のみ操作できます。", flags: MessageFlags.Ephemeral });
+					return;
+				}
+				return await handleStickerComponent(interaction);
+			}
 			if (!interaction.isChatInputCommand()) return;
 			if (interaction.commandName !== "line") return;
 
@@ -98,6 +117,7 @@ export function createInteractionHandler(discord: DiscordClient, startBridge: St
 				case "open": return await cmdOpen(discord, interaction);
 				case "close": return await cmdClose(discord, interaction);
 				case "sync": return await cmdSync(interaction);
+				case "sticker": return await cmdSticker(interaction);
 			}
 		} catch (error) {
 			console.error("[discord] コマンド処理に失敗しました:", error);
@@ -282,7 +302,16 @@ async function handleAutocomplete(interaction: AutocompleteInteraction): Promise
 		await interaction.respond([]).catch(() => null);
 		return;
 	}
-	const query = interaction.options.getFocused();
+	const focused = interaction.options.getFocused(true);
+	if (focused.name === "package") {
+		const choices = await stickerChoices(focused.value).catch((error: unknown) => {
+			console.error("[line] スタンプ一覧を取得できませんでした:", error);
+			return [];
+		});
+		await interaction.respond(choices).catch(() => null);
+		return;
+	}
+	const query = focused.value;
 	let matched: { name: string; chatId: string }[] = [];
 	try {
 		matched = search(await listChats(), query);

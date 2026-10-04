@@ -74,6 +74,21 @@ async function markRead(chatId: string, lineMessageId: string): Promise<void> {
 	}
 }
 
+/**
+ * 自分の送信を (トーク, 本文) で照合するときの「本文」。
+ * スタンプは本文が空なので、空のまま登録すると同じトークで本文の無いメッセージを
+ * 取り違える。スタンプIDで区別する。NULは本文に現れないので、テキストとは衝突しない。
+ */
+function stickerEchoText(stickerId: string): string {
+	return `\u0000sticker:${stickerId}`;
+}
+
+function echoTextOf(message: TalkMessage): string {
+	const stickerId = message.raw.contentMetadata?.STKID;
+	if (isSticker(message.raw.contentType) && stickerId) return stickerEchoText(stickerId);
+	return message.raw.text ?? "";
+}
+
 // ---------------------------------------------------------------- LINE → Discord
 
 /** メッセージが返信なら、引用行を組み立てる。Webhookはネイティブの返信を使えないため。 */
@@ -138,7 +153,7 @@ export async function handleLineMessage(discord: DiscordClient, message: TalkMes
 
 	// IDでの照合は「送信レスポンスが先に返ること」が前提で、これは保証されない。
 	// 自分の発言に限り、送信直前に登録しておいた (トーク, 本文) でも照合する。
-	if (message.isMyMessage && consumePending(chatId, message.raw.text ?? "")) return;
+	if (message.isMyMessage && consumePending(chatId, echoTextOf(message))) return;
 
 	const cache = identities(lineClient);
 	const [chat, sender] = await Promise.all([cache.get(chatId), cache.get(message.raw.from)]);
@@ -435,6 +450,71 @@ async function reportSendFailure(message: DiscordMessage, error: unknown, what: 
 			allowedMentions: { parse: [] },
 		})
 		.catch(() => null);
+}
+
+/**
+ * `/line sticker` で選んだスタンプをLINEへ送り、Discordにも自分の発言としてWebhookで出す。
+ * テキストと違い元になるDiscordのメッセージが無いので、再投稿ではなく新規に投稿する。
+ */
+export async function sendSticker(
+	channelId: string,
+	pkg: { id: string; version: string },
+	stickerId: string,
+	animated: boolean,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+	const mapping = store.getByChannelId(channelId);
+	if (!mapping) return { ok: false, reason: "このチャンネルはLINEトークに紐づいていません。" };
+	const lineClient = getClient();
+	if (!lineClient) return { ok: false, reason: "LINEにログインしていません。" };
+
+	const echoText = stickerEchoText(stickerId);
+	markPending(mapping.chat_id, echoText);
+	let lineId = "";
+	try {
+		const sent = await lineClient.base.talk.sendMessage({
+			to: mapping.chat_id,
+			contentType: "STICKER",
+			contentMetadata: { STKID: stickerId, STKPKGID: pkg.id, STKVER: pkg.version },
+		});
+		if (sent?.id) {
+			store.markSent(sent.id);
+			lineId = String(sent.id);
+		}
+	} catch (error) {
+		cancelPending(mapping.chat_id, echoText);
+		console.error(`[bridge] スタンプの送信に失敗しました (${stickerId}):`, error);
+		return { ok: false, reason: `スタンプの送信に失敗しました: ${String(error).slice(0, 500)}` };
+	}
+
+	store.touch(mapping.chat_id);
+	if (mapping.last_line_message_id) {
+		await markRead(mapping.chat_id, mapping.last_line_message_id);
+	}
+
+	// LINEへは届いている。Discordへの表示に失敗しても送信自体は成功として返す。
+	const webhook = webhookFor(mapping);
+	if (!webhook) return { ok: true };
+	try {
+		const media = await downloadSticker({ STKID: stickerId, ...(animated ? { STKOPT: "A" } : {}) });
+		const myMid = lineClient.base.profile?.mid;
+		const me = myMid ? await identities(lineClient).get(myMid) : { name: "自分", avatar: undefined };
+		const posted = await webhook.send({
+			content: media ? "" : placeholderFor("STICKER"),
+			username: me.name,
+			avatarURL: me.avatar,
+			files: media ? [new AttachmentBuilder(media.data, { name: media.name })] : [],
+			allowedMentions: { parse: [] },
+		});
+		if (lineId) {
+			store.linkMessage(posted.id, lineId, mapping.chat_id, {
+				outgoing: true,
+				preview: placeholderFor("STICKER"),
+			});
+		}
+	} catch (error) {
+		console.error("[bridge] 送信したスタンプをDiscordに表示できませんでした:", error);
+	}
+	return { ok: true };
 }
 
 /** Discord側でLINEメッセージにリアクションを付けたら、そのメッセージまでを既読にする。 */
