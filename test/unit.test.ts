@@ -342,3 +342,58 @@ test("最後に受信したLINEメッセージIDが保持される（発言時�
 	store.setLastLineMessage(FRIEND, "line-42");
 	assert.equal(store.getByChatId(FRIEND)?.last_line_message_id, "line-42");
 });
+
+// ---------------------------------------------------------------- /line catchup の履歴取得
+
+const { collectRawMessages } = await import("../src/line/history.ts");
+
+// 実際の応答に合わせる: 新しい順、終端に指定したメッセージ自身も含む、IDは18桁。
+function fakeTalk(boxes: { id: string; count: number; startAt: number }[]) {
+	const queried: string[] = [];
+	const firstId = 641279516522316500n;
+	const messagesOf = (box: { id: string; count: number; startAt: number }) =>
+		Array.from({ length: box.count }, (_, i) => ({
+			id: String(firstId + BigInt(i)),
+			createdTime: box.startAt + i * 1000,
+			deliveredTime: box.startAt + i * 1000,
+			from: FRIEND,
+			to: ME,
+		}));
+	const talk = {
+		getMessageBoxes: async () => ({
+			hasNext: false,
+			messageBoxes: boxes.map((box) => {
+				const last = messagesOf(box).at(-1)!;
+				return { id: box.id, lastDeliveredMessageId: { messageId: BigInt(last.id), deliveredTime: last.deliveredTime } };
+			}),
+		}),
+		getPreviousMessagesV2WithRequest: async ({ request }: { request: { messageBoxId: string; endMessageId: { messageId: bigint }; messagesCount: number } }) => {
+			queried.push(request.messageBoxId);
+			const box = boxes.find((b) => b.id === request.messageBoxId)!;
+			return messagesOf(box)
+				.filter((m) => BigInt(m.id) <= request.endMessageId.messageId)
+				.reverse()
+				.slice(0, request.messagesCount);
+		},
+	};
+	return { talk: talk as unknown as Parameters<typeof collectRawMessages>[0], queried };
+}
+
+test("履歴はページをまたいで遡り、範囲内だけを重複なく古い順に返す", async () => {
+	const { talk } = fakeTalk([{ id: FRIEND, count: 120, startAt: 0 }]);
+	// 30件目から114件目まで。ページの境目のメッセージは2回返るが1件にまとめる。
+	const messages = await collectRawMessages(talk, 30_000, 115_000);
+	const offsets = messages.map((m) => Number(BigInt(m.id) - 641279516522316500n));
+	assert.deepEqual(offsets, Array.from({ length: 85 }, (_, i) => i + 30));
+});
+
+test("範囲より前で止まっているトークとオープンチャットは問い合わせない", async () => {
+	const { talk, queried } = fakeTalk([
+		{ id: GROUP, count: 5, startAt: 1_000_000 },
+		{ id: ROOM, count: 5, startAt: 0 },
+		{ id: "m4444444444444444444444444444dd", count: 5, startAt: 1_000_000 },
+	]);
+	const messages = await collectRawMessages(talk, 500_000, 2_000_000);
+	assert.deepEqual(queried, [GROUP]);
+	assert.equal(messages.length, 5);
+});

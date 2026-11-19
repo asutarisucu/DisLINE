@@ -140,27 +140,44 @@ async function collectAttachment(
 	}
 }
 
-export async function handleLineMessage(discord: DiscordClient, message: TalkMessage): Promise<void> {
+/** 既読の位置を先へ進めるときだけ更新する。後から取り込んだ古いメッセージで戻さない。 */
+function advanceLastLineMessage(chatId: string, lineMessageId: string): void {
+	const current = store.getByChatId(chatId)?.last_line_message_id;
+	if (current && BigInt(current) >= BigInt(lineMessageId)) return;
+	store.setLastLineMessage(chatId, lineMessageId);
+}
+
+/**
+ * LINEのメッセージをDiscordへ転送する。転送したら true を返す。
+ *
+ * `backfill` は `/line catchup` で後から取り込んだもの。ログイン後のメッセージより
+ * 下に並ぶので、元の送信時刻を添える。
+ */
+export async function handleLineMessage(
+	discord: DiscordClient,
+	message: TalkMessage,
+	options: { backfill?: boolean } = {},
+): Promise<boolean> {
 	// DisLINE 経由で送ったメッセージは polling でも返ってくる。ここで落とさないと二重に出る。
-	if (store.wasSentByUs(message.raw.id)) return;
+	if (store.wasSentByUs(message.raw.id)) return false;
 	// pollingの再接続などで同じイベントが再配信されても二重投稿しない。
-	if (store.wasPostedToDiscord(message.raw.id)) return;
+	if (store.wasPostedToDiscord(message.raw.id)) return false;
 
 	const lineClient = getClient();
-	if (!lineClient) return;
+	if (!lineClient) return false;
 
 	const chatId = resolveChatId(message);
 
 	// IDでの照合は「送信レスポンスが先に返ること」が前提で、これは保証されない。
 	// 自分の発言に限り、送信直前に登録しておいた (トーク, 本文) でも照合する。
-	if (message.isMyMessage && consumePending(chatId, echoTextOf(message))) return;
+	if (message.isMyMessage && consumePending(chatId, echoTextOf(message))) return false;
 
 	const cache = identities(lineClient);
 	const [chat, sender] = await Promise.all([cache.get(chatId), cache.get(message.raw.from)]);
 
 	store.rememberChat(chatId, chat.name);
 	store.touch(chatId);
-	store.setLastLineMessage(chatId, message.raw.id);
+	advanceLastLineMessage(chatId, String(message.raw.id));
 
 	const guild = await getGuild(discord);
 	// 未登録のトークはここで自動的にチャンネル化する。上限に当たれば古いものが閉じる。
@@ -170,7 +187,7 @@ export async function handleLineMessage(discord: DiscordClient, message: TalkMes
 	const webhook = mapping ? webhookFor(mapping) : null;
 	if (!webhook) {
 		console.error(`[bridge] ${chatId} のWebhookが失われています。/line close して開き直してください。`);
-		return;
+		return false;
 	}
 
 	const { media, note } = await collectAttachment(lineClient, message);
@@ -178,7 +195,8 @@ export async function handleLineMessage(discord: DiscordClient, message: TalkMes
 	// 添付が付くならプレースホルダーは要らない。付けられなかったときだけ理由を出す。
 	const body = text || note || (media ? "" : placeholderFor(message.raw.contentType));
 	const quote = replyQuote(message, guild.id);
-	const parts = chunk([quote, body].filter(Boolean).join("\n"));
+	const sentAt = options.backfill ? `-# <t:${Math.floor(Number(message.raw.createdTime) / 1000)}:f>` : null;
+	const parts = chunk([sentAt, quote, body].filter(Boolean).join("\n"));
 	if (parts.length === 0) parts.push("");
 
 	try {
@@ -197,6 +215,7 @@ export async function handleLineMessage(discord: DiscordClient, message: TalkMes
 				preview: text || placeholderFor(message.raw.contentType),
 			});
 		}
+		return true;
 	} catch (error) {
 		console.error(`[bridge] Webhook送信に失敗しました (${chatId}):`, error);
 		if (channel.type === ChannelType.GuildText) {
@@ -207,6 +226,7 @@ export async function handleLineMessage(discord: DiscordClient, message: TalkMes
 				})
 				.catch(() => null);
 		}
+		return false;
 	}
 }
 

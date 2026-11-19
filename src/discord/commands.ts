@@ -17,11 +17,20 @@ import { store } from "../store.ts";
 import { closeChannel, ensureSystemChannel, getGuild, openChannel, pickCategory } from "./channels.ts";
 import { getClient, loginByQr, logout, requireClient } from "../line/session.ts";
 import { invalidate, listChats, search } from "../line/directory.ts";
-import { retractOwnMessage } from "../bridge.ts";
+import { handleLineMessage, retractOwnMessage } from "../bridge.ts";
+import { fetchMessagesBetween } from "../line/history.ts";
+import { resolveChatId } from "../line/util.ts";
 import { runtime } from "../runtime.ts";
 import { STICKER_PREFIX, cmdSticker, handleStickerComponent, stickerChoices } from "./stickers.ts";
 
 const RETRACT_COMMAND = "LINEで取り消す";
+
+const CATCHUP_DEFAULT_HOURS = 48;
+/**
+ * 転送済みかどうかは対応表で判定していて、対応表は7日で消える。
+ * それより前まで遡ると転送済みのものを二重に出すので、余裕を持たせて6日までにする。
+ */
+const CATCHUP_MAX_HOURS = 144;
 
 /**
  * スラッシュコマンドと右クリックメニューを登録する。
@@ -63,6 +72,19 @@ export const commandData = [
 		)
 		.addSubcommand((s) => s.setName("close").setDescription("このチャンネルを閉じます（トーク自体は消えません）"))
 		.addSubcommand((s) => s.setName("sync").setDescription("グループ/友だち一覧を取り直します"))
+		.addSubcommand((s) =>
+			s
+				.setName("catchup")
+				.setDescription("ログインしていなかった間に届いたメッセージを取り込みます")
+				.addIntegerOption((o) =>
+					o
+						.setName("hours")
+						.setDescription(`何時間前まで遡るか（既定 ${CATCHUP_DEFAULT_HOURS}）`)
+						.setMinValue(1)
+						.setMaxValue(CATCHUP_MAX_HOURS)
+						.setRequired(false),
+				),
+		)
 		.addSubcommand((s) =>
 			s
 				.setName("sticker")
@@ -117,6 +139,7 @@ export function createInteractionHandler(discord: DiscordClient, startBridge: St
 				case "open": return await cmdOpen(discord, interaction);
 				case "close": return await cmdClose(discord, interaction);
 				case "sync": return await cmdSync(interaction);
+				case "catchup": return await cmdCatchup(discord, interaction);
 				case "sticker": return await cmdSticker(interaction);
 			}
 		} catch (error) {
@@ -279,6 +302,44 @@ async function cmdSync(interaction: ChatInputCommandInteraction): Promise<void> 
 	invalidate();
 	const entries = await listChats(true);
 	await interaction.editReply(`グループ/友だち ${entries.length} 件を取得しました。`);
+}
+
+let catchingUp = false;
+
+async function cmdCatchup(discord: DiscordClient, interaction: ChatInputCommandInteraction): Promise<void> {
+	if (catchingUp) {
+		await interaction.reply({ content: "取り込みを実行中です。終わるまで待ってください。", flags: MessageFlags.Ephemeral });
+		return;
+	}
+	await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+	const client = requireClient();
+	const hours = interaction.options.getInteger("hours") ?? CATCHUP_DEFAULT_HOURS;
+
+	catchingUp = true;
+	try {
+		// 実行中に届くメッセージは polling が転送する。同じものを両方から出さないよう、開始時刻で切る。
+		const until = Date.now();
+		const { messages, undecryptable } = await fetchMessagesBetween(client, until - hours * 60 * 60 * 1000, until);
+
+		let posted = 0;
+		const chats = new Set<string>();
+		for (const message of messages) {
+			if (await handleLineMessage(discord, message, { backfill: true })) {
+				posted++;
+				chats.add(resolveChatId(message));
+			}
+		}
+
+		const lines = [
+			posted > 0
+				? `${hours}時間分を確認し、${chats.size} 件のトークで ${posted} 件を取り込みました。`
+				: `${hours}時間分を確認しました。取り込んでいないメッセージはありませんでした。`,
+		];
+		if (undecryptable > 0) lines.push(`復号できなかったメッセージが ${undecryptable} 件あります。`);
+		await interaction.editReply(lines.join("\n"));
+	} finally {
+		catchingUp = false;
+	}
 }
 
 // ---------------------------------------------------------------- 取り消し / autocomplete
