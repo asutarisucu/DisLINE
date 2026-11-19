@@ -8,6 +8,12 @@ const AUTH_TOKEN_KEY = "line.authToken";
 /** E2EE鍵やrefreshTokenはここに入る。authToken だけ持っていても再開できない。 */
 const storage = new FileStorage(config.lineStoragePath);
 
+/**
+ * 2026-11-18 から LEGY の暗号化経路 (/enc) が空の 404 を返すようになっている。
+ * 平文の /S4 は通るので暗号化を切る。https://github.com/evex-dev/linejs/issues/280
+ */
+const legy = { encrypted: false };
+
 let client: Client | null = null;
 let tokenWatcher: NodeJS.Timeout | null = null;
 
@@ -45,7 +51,7 @@ export async function resume(): Promise<boolean> {
 	const token = store.getMeta(AUTH_TOKEN_KEY);
 	if (!token) return false;
 	try {
-		afterLogin(await loginWithAuthToken(token, { device: config.device, storage }));
+		afterLogin(await loginWithAuthToken(token, { device: config.device, storage, legy }));
 		return true;
 	} catch (error) {
 		console.error("[line] 保存済みトークンでの再開に失敗しました:", error);
@@ -61,7 +67,7 @@ export interface QrLoginHandlers {
 export async function loginByQr(handlers: QrLoginHandlers): Promise<Client> {
 	const logged = await loginWithQR(
 		{ onReceiveQRUrl: handlers.onQrUrl, onPincodeRequest: handlers.onPincode },
-		{ device: config.device, storage },
+		{ device: config.device, storage, legy },
 	);
 	return afterLogin(logged);
 }
